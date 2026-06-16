@@ -9,7 +9,7 @@ cd backend
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
+cp .env .env
 # 编辑 .env 填入你的API Key
 python -m api.main
 ```

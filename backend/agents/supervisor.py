@@ -7,6 +7,7 @@ Supervisor编排Agent — 中央协调者
 from __future__ import annotations
 
 import operator
+import os
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -164,7 +165,11 @@ def create_supervisor_graph(
         enable_checkpointing: 是否启用检查点（支持断点恢复）
     """
     if llm is None:
-        llm = ChatOpenAI(model="gpt-4o", temperature=0)
+        llm = ChatOpenAI(
+            model=os.getenv("MODEL_NAME"),
+            temperature=0,
+            base_url=os.getenv("OPENAI_BASE_URL"),
+        )
     if working_memory is None:
         working_memory = WorkingMemory()
 

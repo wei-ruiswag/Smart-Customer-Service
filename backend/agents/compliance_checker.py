@@ -19,6 +19,7 @@ from langchain_openai import ChatOpenAI
 from tracing.otel_config import trace_agent_call
 
 
+
 @dataclass
 class ComplianceResult:
     """合规审查结果"""
