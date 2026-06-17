@@ -119,6 +119,6 @@ def build_rag_context(results: List[Dict]) -> str:
 
 
 if __name__ == "__main__":
-    query = "退款多久能到账？"
+    query = "换货怎么换？"
     results = search_knowledge(query, top_k=3)
     print(build_rag_context(results))

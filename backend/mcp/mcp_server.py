@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 from datetime import datetime
 
+from service.knowledge_service import KnowledgeService
 
 @dataclass
 class ToolDefinition:
@@ -228,9 +229,10 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
         category="knowledge",
     )
     async def knowledge_search(query: str, top_k: int = 3) -> list[dict]:
-        return [
-            {"content": f"关于'{query}'的知识库文档片段", "source": "FAQ.md", "score": 0.95},
-        ]
+        return KnowledgeService.search(query=query, top_k=top_k)
+        # return [
+        #     {"content": f"关于'{query}'的知识库文档片段", "source": "FAQ.md", "score": 0.95},
+        # ]
 
     @server.register(
         name="ticket_create",

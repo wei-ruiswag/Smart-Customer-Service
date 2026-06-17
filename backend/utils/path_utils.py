@@ -40,6 +40,25 @@ def get_abs_path(relative_path: str) -> Path:
     return get_project_root() / relative_path
 
 
+
+def get_relative_path(path: str | Path) -> str:
+    """
+    将绝对路径或 Path 转成相对于 backend 根目录的路径。
+
+    例如：
+    D:/xxx/backend/data/knowledge/faq.md
+    -> data/knowledge/faq.md
+    """
+    root = get_project_root().resolve()
+    abs_path = Path(path).resolve()
+
+    try:
+        return abs_path.relative_to(root).as_posix()
+    except ValueError:
+        # 如果传入路径不在 backend 目录下，就退化为文件名或原始路径
+        return abs_path.as_posix()
+
+
 def ensure_dir(relative_path: str) -> Path:
     """
     确保某个目录存在，如果不存在则自动创建。

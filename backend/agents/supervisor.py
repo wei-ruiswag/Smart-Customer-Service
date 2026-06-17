@@ -22,7 +22,7 @@ from agents.ticket_handler import TicketHandlerAgent
 from agents.compliance_checker import ComplianceCheckerAgent
 from memory.working_memory import WorkingMemory
 from memory.short_term import ShortTermMemory
-from memory.long_term import LongTermMemory
+from memory.long_term_old import LongTermMemory
 from tracing.otel_config import trace_agent_call
 
 

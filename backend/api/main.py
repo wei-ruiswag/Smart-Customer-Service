@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from agents.supervisor import create_supervisor_graph
 from memory.working_memory import WorkingMemory
 from memory.short_term import ShortTermMemory
-from memory.long_term import LongTermMemory
+from memory.long_term_old import LongTermMemory
 from mcp.mcp_server import MCPToolServer, create_default_tools
 from tracing.otel_config import init_tracer, AgentMetrics
 

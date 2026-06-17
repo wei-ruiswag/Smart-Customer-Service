@@ -11,8 +11,10 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from memory.long_term import LongTermMemory
+from memory.long_term_old import LongTermMemory
 from tracing.otel_config import trace_agent_call
+
+from rag.knowledge_search import search_knowledge
 
 
 RAG_SYSTEM_PROMPT = """你是一个专业的知识库问答Agent，负责根据检索到的文档回答用户问题。
@@ -57,8 +59,9 @@ class KnowledgeRAGAgent:
     @trace_agent_call("rag_retrieve")
     async def retrieve_documents(self, query: str, top_k: int = 5) -> list[dict]:
         """从向量数据库检索相关文档"""
-        docs = self.long_term_memory.search(query, top_k=top_k)
-        return docs
+        return search_knowledge(query=query, top_k=top_k)
+        # docs = self.long_term_memory.search(query, top_k=top_k)
+        # return docs
 
     @trace_agent_call("rag_rerank")
     async def rerank_documents(

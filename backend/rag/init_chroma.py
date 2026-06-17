@@ -197,6 +197,15 @@ def import_docs_to_chroma(reset: bool = False, force: bool = False) -> None:
     skipped_files = 0
     imported_chunks = 0
 
+
+    '''
+    当前文件路径 source_path 已经在 manifest 中存在
+    +
+    当前文件 MD5 和之前记录的 MD5 一样
+    +
+    Chroma 里对应 chunk 也还存在
+    => 跳过，不再重新分段，也不再写入 Chroma
+    '''
     for file_path in files:
         source_path = get_relative_path(file_path)
         current_file_md5 = calc_file_md5(file_path)
