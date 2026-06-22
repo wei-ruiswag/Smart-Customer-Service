@@ -33,35 +33,55 @@ class TicketPriority(str, Enum):
     URGENT = "urgent"
 
 
-TICKET_SYSTEM_PROMPT = """你是一个专业的工单处理Agent，负责处理客户的业务办理请求。
+TICKET_SYSTEM_PROMPT = """你是一个面向电商客服场景的工单处理 Agent，只负责工单创建、查询和更新。
 
-你的职责：
-1. 分析用户需求，判断是否需要创建工单
-2. 提取工单关键信息（类型、优先级、描述）
-3. 创建工单并返回工单号
-4. 查询现有工单状态
+你不负责回答通用规则，也不负责查询订单物流状态。
+- “怎么退款 / 退款流程 / 退款多久到账”属于规则咨询，不应该创建工单。
+- “我的订单什么时候到 / 订单发货了吗”属于订单查询，不应该创建工单。
+- 只有用户明确要求申请、办理、投诉、创建工单、查询工单、更新工单时，才进入工单处理。
 
-工单类型：
-- refund: 退款申请
-- claim: 理赔申请
-- account_open: 开户申请
-- account_change: 账户变更
-- complaint: 投诉工单
-- general: 通用工单
+你的任务：
+1. 判断 action：create、query、update、clarify。
+2. 提取 ticket_no、order_no、ticket_type、priority、description。
+3. 创建工单必须尽量提取 order_no；如果用户没有提供订单号，返回 clarify。
+4. 查询工单时，如果有工单号，提取 ticket_no；如果没有工单号但有订单号，提取 order_no。
+5. 不要编造工单号、订单号、用户ID。
 
-优先级判断规则：
-- urgent: 资金安全、账户被盗
-- high: 退款超时、理赔争议
-- medium: 常规业务办理
-- low: 信息咨询类
+工单类型只能从以下值中选择：
+- 退款
+- 退货
+- 换货
+- 物流异常
+- 商品质量
+- 发票问题
+- 优惠券问题
+- 投诉
+- 通用
 
-请以JSON格式返回工单信息：
+优先级只能从以下值中选择：
+- 低
+- 中
+- 高
+- 紧急
+
+状态只能从以下值中选择：
+- 待处理
+- 处理中
+- 已完成
+- 已关闭
+
+请只返回合法 JSON，不要使用 markdown，不要使用代码块。
+
+返回格式：
 {
-    "action": "create|query|update",
-    "ticket_type": "refund|claim|account_open|...",
-    "priority": "low|medium|high|urgent",
-    "summary": "工单摘要",
-    "details": "详细描述"
+  "action": "create|query|update|clarify",
+  "ticket_no": "",
+  "order_no": "",
+  "ticket_type": "退款",
+  "priority": "中",
+  "description": "用户希望申请退款",
+  "status": "",
+  "clarification_question": ""
 }
 """
 
@@ -103,11 +123,11 @@ class TicketStore:
 
 
 class TicketHandlerAgent:
-    """工单处理Agent"""
+    """工单处理 Agent：通过 MCP 工具操作 MySQL tickets 表"""
 
-    def __init__(self, llm: ChatOpenAI, ticket_store: TicketStore | None = None):
+    def __init__(self, llm: ChatOpenAI, mcp_server: Any):
         self.llm = llm
-        self.ticket_store = ticket_store or TicketStore()
+        self.mcp_server = mcp_server
 
     @trace_agent_call("ticket_analyze")
     async def analyze_request(self, user_message: str) -> dict:
@@ -120,71 +140,157 @@ class TicketHandlerAgent:
         response = await self.llm.ainvoke(messages)
 
         import json
+        content = response.content.strip()
+
+        # 兼容模型偶尔返回 ```json ... ```
+        if content.startswith("```"):
+            content = content.strip("`")
+            content = content.replace("json", "", 1).strip()
+
         try:
-            return json.loads(response.content)
+            return json.loads(content)
         except json.JSONDecodeError:
             return {
-                "action": "create",
-                "ticket_type": "general",
-                "priority": "medium",
-                "summary": user_message[:100],
-                "details": user_message,
+                "action": "clarify",
+                "ticket_no": "",
+                "order_no": "",
+                "ticket_type": "通用",
+                "priority": "中",
+                "description": user_message,
+                "status": "",
+                "clarification_question": "请补充订单号和需要处理的问题，我再帮您创建或查询工单。",
             }
+
+    async def _call_tool(self, tool_name: str, arguments: dict) -> dict:
+        call_result = await self.mcp_server.call_tool(tool_name, arguments)
+
+        if not call_result.success:
+            return {
+                "success": False,
+                "message": call_result.error or f"{tool_name} 调用失败",
+                "result": None,
+            }
+
+        return {
+            "success": True,
+            "message": "",
+            "result": call_result.result,
+        }
+
+    def _format_ticket(self, ticket: dict) -> str:
+        return (
+            f"📋 工单号: {ticket.get('ticket_no', '')}\n"
+            f"🔗 关联订单: {ticket.get('order_no', '')}\n"
+            f"📝 类型: {ticket.get('ticket_type', '')}\n"
+            f"⚡ 优先级: {ticket.get('priority', '')}\n"
+            f"📊 状态: {ticket.get('status', '')}\n"
+            f"📄 问题描述: {ticket.get('description', '')}\n"
+            f"🕐 创建时间: {ticket.get('created_at', '')}\n"
+            f"🔄 更新时间: {ticket.get('updated_at', '')}"
+        )
 
     @trace_agent_call("ticket_create")
     async def create_ticket(self, ticket_info: dict, user_id: str) -> str:
-        """创建工单"""
-        ticket = self.ticket_store.create(
-            ticket_type=ticket_info.get("ticket_type", "general"),
-            priority=ticket_info.get("priority", "medium"),
-            summary=ticket_info.get("summary", ""),
-            details=ticket_info.get("details", ""),
-            user_id=user_id,
+        order_no = ticket_info.get("order_no", "").strip()
+        description = ticket_info.get("description", "").strip()
+
+        if not order_no:
+            return "请提供需要处理的订单号，我再帮您创建工单。"
+
+        if not description:
+            return "请补充需要处理的问题描述，例如退款原因、商品问题或物流异常情况。"
+
+        tool_result = await self._call_tool(
+            "ticket_create",
+            {
+                "user_id": user_id,
+                "order_no": order_no,
+                "ticket_type": ticket_info.get("ticket_type", "通用"),
+                "priority": ticket_info.get("priority", "中"),
+                "description": description,
+            },
         )
 
-        priority_label = {
-            "low": "普通", "medium": "中等", "high": "高", "urgent": "紧急"
-        }.get(ticket["priority"], "中等")
+        if not tool_result["success"]:
+            return f"工单创建失败：{tool_result['message']}"
+
+        result = tool_result["result"]
+        if not result.get("found"):
+            return result.get("message", "工单创建失败，请稍后重试。")
+
+        ticket = result["ticket"]
 
         return (
-            f"工单已创建成功！\n\n"
-            f"📋 工单号: {ticket['ticket_id']}\n"
-            f"📝 类型: {ticket['type']}\n"
-            f"⚡ 优先级: {priority_label}\n"
-            f"📄 摘要: {ticket['summary']}\n"
-            f"🕐 创建时间: {ticket['created_at']}\n\n"
-            f"我们将尽快处理您的请求，请保存好工单号以便后续查询。"
+            "工单已创建成功！\n\n"
+            f"{self._format_ticket(ticket)}\n\n"
+            "我们将尽快处理您的请求，请保存好工单号以便后续查询。"
         )
 
     @trace_agent_call("ticket_query")
-    async def query_ticket(self, ticket_id: str) -> str:
+    async def query_ticket(self, ticket_info: dict, user_id: str) -> str:
         """查询工单状态"""
-        ticket = self.ticket_store.query(ticket_id)
-        if not ticket:
-            return f"未找到工单号 {ticket_id}，请确认工单号是否正确。"
+        ticket_no = ticket_info.get("ticket_no", "").strip()
+        order_no = ticket_info.get("order_no", "").strip()
 
-        status_label = {
-            "created": "已创建",
-            "processing": "处理中",
-            "pending_review": "待审核",
-            "resolved": "已解决",
-            "closed": "已关闭",
-            "escalated": "已升级",
-        }.get(ticket["status"], ticket["status"])
+        tool_result = await self._call_tool(
+            "ticket_query",
+            {
+                "ticket_no": ticket_no,
+                "user_id": user_id,
+                "order_no": order_no,
+                "limit": 5,
+            },
+        )
+
+        if not tool_result["success"]:
+            return f"工单查询失败：{tool_result['message']}"
+
+        result = tool_result["result"]
+        if not result.get("found"):
+            return result.get("message", "未查询到符合条件的工单。")
+
+        tickets = result.get("tickets", [])
+        formatted = "\n\n".join(self._format_ticket(ticket) for ticket in tickets)
+
+        return f"工单查询结果：\n\n{formatted}"
+
+    @trace_agent_call("ticket_update")
+    async def update_ticket(self, ticket_info: dict) -> str:
+        ticket_no = ticket_info.get("ticket_no", "").strip()
+        status = ticket_info.get("status", "").strip()
+
+        if not ticket_no:
+            return "请提供需要更新的工单号。"
+
+        if not status:
+            return "请提供需要更新的工单状态。"
+
+        tool_result = await self._call_tool(
+            "ticket_update",
+            {
+                "ticket_no": ticket_no,
+                "status": status,
+            },
+        )
+
+        if not tool_result["success"]:
+            return f"工单更新失败：{tool_result['message']}"
+
+        result = tool_result["result"]
+        if not result.get("found"):
+            return result.get("message", f"未找到工单号 {ticket_no}。")
 
         return (
-            f"工单查询结果：\n\n"
-            f"📋 工单号: {ticket['ticket_id']}\n"
-            f"📊 状态: {status_label}\n"
-            f"📝 类型: {ticket['type']}\n"
-            f"📄 摘要: {ticket['summary']}\n"
-            f"🕐 创建时间: {ticket['created_at']}\n"
-            f"🔄 更新时间: {ticket['updated_at']}"
+            "工单状态已更新：\n\n"
+            f"{self._format_ticket(result['ticket'])}"
         )
 
     @trace_agent_call("ticket_handler_process")
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
-        """作为Graph节点处理状态"""
+        """
+        作为Graph节点处理状态
+        作为一个“工单助手（Ticket Handler）”分流器，自动识别用户的意图（创建、查询、更新或澄清工单），执行对应的操作，并将结果更新到全局状态中
+        """
         messages = state.get("messages", [])
         user_id = state.get("user_id", "anonymous")
 
@@ -194,12 +300,16 @@ class TicketHandlerAgent:
         last_message = messages[-1].content
         ticket_info = await self.analyze_request(last_message)
 
-        action = ticket_info.get("action", "create")
+        action = ticket_info.get("action", "clarify")
 
-        if action == "query" and "ticket_id" in ticket_info:
-            result = await self.query_ticket(ticket_info["ticket_id"])
-        else:
+        if action == "create":
             result = await self.create_ticket(ticket_info, user_id)
+        elif action == "query":
+            result = await self.query_ticket(ticket_info, user_id)
+        elif action == "update":
+            result = await self.update_ticket(ticket_info)
+        else:
+            result = ticket_info.get("clarification_question") or "请补充订单号、工单号或需要处理的问题。"
 
         return {
             **state,
@@ -208,3 +318,5 @@ class TicketHandlerAgent:
                 "ticket_handler": result,
             },
         }
+
+

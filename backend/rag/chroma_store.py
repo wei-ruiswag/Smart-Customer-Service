@@ -64,13 +64,13 @@ def get_knowledge_collection():
     if embedding_function is None:
         return client.get_or_create_collection(
             name=COLLECTION_NAME,
-            metadata={"description": "ecommerce customer service knowledge base"},
+            metadata={"description": "ecommerce customer services knowledge base"},
         )
 
     return client.get_or_create_collection(
         name=COLLECTION_NAME,
         embedding_function=embedding_function,
-        metadata={"description": "ecommerce customer service knowledge base"},
+        metadata={"description": "ecommerce customer services knowledge base"},
     )
 
 

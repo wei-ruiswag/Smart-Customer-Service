@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import re
+import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,6 +20,8 @@ from langchain_openai import ChatOpenAI
 
 from tracing.otel_config import trace_agent_call
 
+
+logger = logging.getLogger("compliance")
 
 
 @dataclass
@@ -38,28 +42,50 @@ SENSITIVE_PATTERNS = {
 }
 
 FORBIDDEN_TERMS = [
-    "保证收益", "稳赚不赔", "零风险", "保本保息",
-    "最高收益", "预期收益率", "承诺回报",
-    "内部消息", "内幕", "暗箱操作",
+    "保证退款", "一定到账", "必定送达", "百分百赔付",
+    "私下转账", "加微信付款", "提供验证码", "支付密码",
+    # "保证收益", "稳赚不赔", "零风险", "保本保息",
+    # "最高收益", "预期收益率", "承诺回报",
+    # "内部消息", "内幕", "暗箱操作",
 ]
 
-COMPLIANCE_SYSTEM_PROMPT = """你是一个金融合规审查Agent，负责审查客服回复内容的合规性。
+COMPLIANCE_SYSTEM_PROMPT = """你是一个面向电商客服场景的合规审查 Agent，负责审查客服回复内容是否安全、合规、适合发送给用户。
 
 审查维度：
-1. 是否包含违规金融用语（如"保证收益"、"零风险"等）
-2. 是否泄露用户PII信息（手机号、身份证号、银行卡号）
-3. 是否存在越权承诺（如擅自承诺退款/赔偿金额）
-4. 是否符合金融监管要求（风险提示、免责声明）
-5. 是否包含歧视性、侮辱性内容
+1. 是否泄露用户隐私信息，例如完整手机号、身份证号、银行卡号、邮箱、详细收货地址。
+2. 是否存在绝对化承诺，例如“保证退款到账”“一定今天送达”“必定赔偿”。
+3. 是否存在越权承诺，例如未经审核直接承诺退款、赔偿金额、特殊优惠。
+4. 是否存在支付或交易风险，例如引导用户脱离平台交易、私下转账、提供验证码或支付密码。
+5. 是否存在不当客服表达，例如歧视、侮辱、威胁、诱导用户放弃合法权益。
+6. 是否需要建议转人工客服处理。
 
-请以JSON格式返回审查结果：
+请只返回合法 JSON，不要使用 markdown，不要使用代码块。
+
+返回格式：
 {
-    "passed": true/false,
-    "risk_level": "low|medium|high|critical",
-    "violations": ["违规项描述"],
-    "suggestions": ["修改建议"]
-}
-"""
+  "passed": true,
+  "risk_level": "low",
+  "violations": [],
+  "suggestions": []
+}"""
+
+# 你是一个金融合规审查Agent，负责审查客服回复内容的合规性。
+#
+# 审查维度：
+# 1. 是否包含违规金融用语（如"保证收益"、"零风险"等）
+# 2. 是否泄露用户PII信息（手机号、身份证号、银行卡号）
+# 3. 是否存在越权承诺（如擅自承诺退款/赔偿金额）
+# 4. 是否符合金融监管要求（风险提示、免责声明）
+# 5. 是否包含歧视性、侮辱性内容
+#
+# 请以JSON格式返回审查结果：
+# {
+#     "passed": true/false,
+#     "risk_level": "low|medium|high|critical",
+#     "violations": ["违规项描述"],
+#     "suggestions": ["修改建议"]
+# }
+
 
 
 class ComplianceCheckerAgent:
@@ -74,7 +100,7 @@ class ComplianceCheckerAgent:
 
         for term in FORBIDDEN_TERMS:
             if term in content:
-                violations.append(f"包含违规金融用语: '{term}'")
+                violations.append(f"包含违规用语: '{term}'")
 
         for pii_type, pattern in SENSITIVE_PATTERNS.items():
             if re.search(pattern, content):
@@ -186,32 +212,100 @@ class ComplianceCheckerAgent:
     @trace_agent_call("compliance_process")
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
         """作为Graph节点处理状态"""
+
         sub_results = state.get("sub_results", {})
 
-        content_to_check = ""
+        # 只检查业务 Agent 生成的自然语言回复，不检查 dict、list 等结构化对象
+        content_parts = []
         for agent_name, result in sub_results.items():
-            if isinstance(result, str):
-                content_to_check += result + "\n"
+            if isinstance(result, str) and result.strip():
+                content_parts.append(result.strip())
 
+        content_to_check = "\n".join(content_parts)
+
+        # 没有可审查内容时，给出默认合规通过报告
         if not content_to_check.strip():
-            return {**state, "compliance_passed": True}
+            compliance_report = {
+                "passed": True,
+                "risk_level": "low",
+                "violations": [],
+                "suggestions": [],
+            }
+
+            return {
+                **state,
+                "compliance_passed": True,
+                "compliance_report": compliance_report,
+                "sub_results": sub_results,
+            }
 
         compliance_result = await self.full_check(content_to_check)
 
-        if not compliance_result.passed:
-            for key in sub_results:
-                if isinstance(sub_results[key], str):
-                    sub_results[key] = compliance_result.sanitized_content
+        compliance_report = {
+            "passed": compliance_result.passed,
+            "risk_level": compliance_result.risk_level,
+            "violations": compliance_result.violations,
+            "suggestions": compliance_result.suggestions,
+        }
+
+        # 日志只记录结构化合规结果，不记录完整用户隐私内容
+        log_record = {
+            "session_id": state.get("session_id"),
+            "user_id": state.get("user_id"),
+            "intent": state.get("intent"),
+            "compliance_passed": compliance_result.passed,
+            "risk_level": compliance_result.risk_level,
+            "violations": compliance_result.violations,
+            "suggestions": compliance_result.suggestions,
+        }
+
+        if compliance_result.passed:
+            logger.info(
+                "compliance_check %s",
+                json.dumps(log_record, ensure_ascii=False),
+            )
+        else:
+            logger.warning(
+                "compliance_violation %s",
+                json.dumps(log_record, ensure_ascii=False),
+            )
 
         return {
             **state,
             "compliance_passed": compliance_result.passed,
-            "sub_results": {
-                **sub_results,
-                "compliance": {
-                    "passed": compliance_result.passed,
-                    "risk_level": compliance_result.risk_level,
-                    "violations": compliance_result.violations,
-                },
-            },
+            "compliance_report": compliance_report,
+            "sub_results": sub_results,
         }
+
+    # @trace_agent_call("compliance_process")
+    # async def process(self, state: dict[str, Any]) -> dict[str, Any]:
+    #     """作为Graph节点处理状态"""
+    #     sub_results = state.get("sub_results", {})
+    #
+    #     content_to_check = ""
+    #     for agent_name, result in sub_results.items():
+    #         if isinstance(result, str):
+    #             content_to_check += result + "\n"
+    #
+    #     if not content_to_check.strip():
+    #         return {**state, "compliance_passed": True}
+    #
+    #     compliance_result = await self.full_check(content_to_check)
+    #
+    #     if not compliance_result.passed:
+    #         for key in sub_results:
+    #             if isinstance(sub_results[key], str):
+    #                 sub_results[key] = compliance_result.sanitized_content
+    #
+    #     return {
+    #         **state,
+    #         "compliance_passed": compliance_result.passed,
+    #         "sub_results": {
+    #             **sub_results,
+    #             "compliance": {
+    #                 "passed": compliance_result.passed,
+    #                 "risk_level": compliance_result.risk_level,
+    #                 "violations": compliance_result.violations,
+    #             },
+    #         },
+    #     }

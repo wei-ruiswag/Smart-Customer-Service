@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 from datetime import datetime
 
-from service.knowledge_service import KnowledgeService
+from mcp.tools.knowledge_tool import knowledge_search
+from mcp.tools.product_tool import product_query
+from mcp.tools.ticket_tool import ticket_create, ticket_query, ticket_update
 
 @dataclass
 class ToolDefinition:
@@ -215,7 +217,7 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "created_at": "2026-04-01T10:00:00",
         }
 
-    @server.register(
+    server.register(
         name="knowledge_search",
         description="搜索企业知识库，返回相关文档片段",
         input_schema={
@@ -227,36 +229,108 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "required": ["query"],
         },
         category="knowledge",
-    )
-    async def knowledge_search(query: str, top_k: int = 3) -> list[dict]:
-        return KnowledgeService.search(query=query, top_k=top_k)
-        # return [
-        #     {"content": f"关于'{query}'的知识库文档片段", "source": "FAQ.md", "score": 0.95},
-        # ]
+    )(knowledge_search)
 
-    @server.register(
+    # @server.register(
+    #     name="knowledge_search",
+    #     description="搜索企业知识库，返回相关文档片段",
+    #     input_schema={
+    #         "type": "object",
+    #         "properties": {
+    #             "query": {"type": "string", "description": "搜索查询"},
+    #             "top_k": {"type": "integer", "description": "返回数量", "default": 3},
+    #         },
+    #         "required": ["query"],
+    #     },
+    #     category="knowledge",
+    # )
+    # async def knowledge_search(query: str, top_k: int = 3) -> list[dict]:
+    #     return KnowledgeService.search(query=query, top_k=top_k)
+    #     # return [
+    #     #     {"content": f"关于'{query}'的知识库文档片段", "source": "FAQ.md", "score": 0.95},
+    #     # ]
+
+    server.register(
         name="ticket_create",
-        description="创建客服工单",
+        description="创建客服工单，写入 MySQL tickets 表",
         input_schema={
             "type": "object",
             "properties": {
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"]},
-                "category": {"type": "string"},
+                "user_id": {"type": "string", "description": "用户ID"},
+                "order_no": {"type": "string", "description": "关联订单号"},
+                "ticket_type": {
+                    "type": "string",
+                    "description": "工单类型，例如：退款、退货、换货、物流异常、商品质量、发票问题、优惠券问题、投诉、通用",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["低", "中", "高", "紧急"],
+                    "description": "工单优先级",
+                    "default": "中",
+                },
+                "description": {"type": "string", "description": "工单问题描述"},
             },
-            "required": ["title", "description"],
+            "required": ["user_id", "order_no", "ticket_type", "description"],
         },
         category="ticket",
-    )
-    async def ticket_create(title: str, description: str, priority: str = "medium", category: str = "general") -> dict:
-        import uuid
-        return {
-            "ticket_id": f"TK-{uuid.uuid4().hex[:8].upper()}",
-            "title": title,
-            "status": "created",
-            "priority": priority,
-        }
+    )(ticket_create)
+
+    server.register(
+        name="ticket_query",
+        description="查询客服工单，支持按工单号、订单号或用户ID查询",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ticket_no": {"type": "string", "description": "工单号"},
+                "user_id": {"type": "string", "description": "用户ID"},
+                "order_no": {"type": "string", "description": "订单号"},
+                "limit": {"type": "integer", "description": "返回数量", "default": 5},
+            },
+        },
+        category="ticket",
+    )(ticket_query)
+
+    server.register(
+        name="ticket_update",
+        description="更新客服工单状态",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "ticket_no": {"type": "string", "description": "工单号"},
+                "status": {
+                    "type": "string",
+                    "enum": ["待处理", "处理中", "已完成", "已关闭"],
+                    "description": "新的工单状态",
+                },
+            },
+            "required": ["ticket_no", "status"],
+        },
+        category="ticket",
+    )(ticket_update)
+
+    # @server.register(
+    #     name="ticket_create",
+    #     description="创建客服工单",
+    #     input_schema={
+    #         "type": "object",
+    #         "properties": {
+    #             "title": {"type": "string"},
+    #             "description": {"type": "string"},
+    #             "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"]},
+    #             "category": {"type": "string"},
+    #         },
+    #         "required": ["title", "description"],
+    #     },
+    #     category="ticket",
+    # )
+    # async def ticket_create(title: str, description: str, priority: str = "medium", category: str = "general") -> dict:
+    #     import uuid
+    #     return {
+    #         "ticket_id": f"TK-{uuid.uuid4().hex[:8].upper()}",
+    #         "title": title,
+    #         "status": "created",
+    #         "priority": priority,
+    #     }
 
     @server.register(
         name="risk_check",
@@ -285,5 +359,22 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "risk_level": risk_level,
             "requires_manual_review": risk_level == "high",
         }
+
+    server.register(
+        name="product_query",
+        description="查询商品信息，支持按关键词、分类、价格范围和库存状态查询",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "商品关键词，例如：耳机、手机、键盘"},
+                "category": {"type": "string", "description": "商品分类，例如：耳机、手机、家电"},
+                "min_price": {"type": "number", "description": "最低价格"},
+                "max_price": {"type": "number", "description": "最高价格"},
+                "only_in_stock": {"type": "boolean", "description": "是否只查询有库存商品", "default": True},
+                "limit": {"type": "integer", "description": "返回数量", "default": 5},
+            },
+        },
+        category="product",
+    )(product_query)
 
     return server

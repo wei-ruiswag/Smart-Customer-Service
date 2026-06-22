@@ -22,7 +22,8 @@ from agents.ticket_handler import TicketHandlerAgent
 from agents.compliance_checker import ComplianceCheckerAgent
 from memory.working_memory import WorkingMemory
 from memory.short_term import ShortTermMemory
-from memory.long_term_old import LongTermMemory
+from memory.long_term import LongTermMemory
+from mcp.mcp_server import MCPToolServer, create_default_tools
 from tracing.otel_config import trace_agent_call
 
 
@@ -34,8 +35,9 @@ class AgentState(TypedDict):
     user_id: str
     session_id: str
     intent: str
-    sub_results: dict[str, Any]
+    sub_results: dict[str, Any]             # 只保存业务 Agent 的自然语言回复
     compliance_passed: bool
+    compliance_report: dict[str, Any]       # 合规审查结果单独保存
     final_response: str
     current_agent: str
     retry_count: int
@@ -102,26 +104,62 @@ class SupervisorNode:
     @trace_agent_call("supervisor_synthesize")
     async def synthesize_response(self, state: AgentState) -> AgentState:
         """汇总子Agent结果，生成最终回复"""
-        sub_results = state.get("sub_results", {})
-        compliance_passed = state.get("compliance_passed", True)
 
+        sub_results = state.get("sub_results", {})
+        compliance_report = state.get("compliance_report", {})
+        compliance_passed = state.get(
+            "compliance_passed",
+            compliance_report.get("passed", True),
+        )
+
+        # 合规不通过时，不把原业务回复直接返回给用户
         if not compliance_passed:
             final_response = (
-                "抱歉，您的请求涉及敏感内容，已转交人工客服处理。"
-                "工单编号已自动生成，请留意后续通知。"
+                "抱歉，当前回复可能涉及隐私信息、交易风险或不合规承诺，"
+                "已为您转人工客服处理。"
             )
         else:
             result_parts = []
+
+            # 只拼接字符串类型的业务回复，跳过 dict/list 等结构化数据
             for agent_name, result in sub_results.items():
-                if result:
-                    result_parts.append(result)
-            final_response = "\n\n".join(result_parts) if result_parts else "抱歉，暂时无法处理您的请求，请稍后重试。"
+                if isinstance(result, str) and result.strip():
+                    result_parts.append(result.strip())
+
+            if result_parts:
+                final_response = "\n\n".join(result_parts)
+            else:
+                final_response = "抱歉，暂时无法处理您的请求，请稍后重试。"
 
         return {
             **state,
             "final_response": final_response,
             "messages": [AIMessage(content=final_response)],
         }
+
+    # @trace_agent_call("supervisor_synthesize")
+    # async def synthesize_response(self, state: AgentState) -> AgentState:
+    #     """汇总子Agent结果，生成最终回复"""
+    #     sub_results = state.get("sub_results", {})
+    #     compliance_passed = state.get("compliance_passed", True)
+    #
+    #     if not compliance_passed:
+    #         final_response = (
+    #             "抱歉，您的请求涉及敏感内容，已转交人工客服处理。"
+    #             "工单编号已自动生成，请留意后续通知。"
+    #         )
+    #     else:
+    #         result_parts = []
+    #         for agent_name, result in sub_results.items():
+    #             if result:
+    #                 result_parts.append(result)
+    #         final_response = "\n\n".join(result_parts) if result_parts else "抱歉，暂时无法处理您的请求，请稍后重试。"
+    #
+    #     return {
+    #         **state,
+    #         "final_response": final_response,
+    #         "messages": [AIMessage(content=final_response)],
+    #     }
 
 
 # ─── 路由函数 ───
@@ -132,7 +170,7 @@ def route_to_agent(state: AgentState) -> str:
     route_map = {
         "knowledge_rag": "knowledge_rag",
         "ticket_handler": "ticket_handler",
-        "compliance_checker": "compliance_check",
+        # "compliance_checker": "compliance_check",
     }
     return route_map.get(intent, "knowledge_rag")
 
@@ -150,6 +188,8 @@ def create_supervisor_graph(
     short_term_memory: ShortTermMemory | None = None,
     long_term_memory: LongTermMemory | None = None,
     enable_checkpointing: bool = True,
+    mcp_server: MCPToolServer | None = None
+
 ) -> StateGraph:
     """
     构建Supervisor编排的多Agent StateGraph。
@@ -173,11 +213,17 @@ def create_supervisor_graph(
     if working_memory is None:
         working_memory = WorkingMemory()
 
+    # 如果外部没有传入 mcp_server，则创建一个默认工具服务
+    # 更推荐在 api/main.py 中创建后传进来，保证全局共用同一个 mcp_server。
+    if mcp_server is None:
+        mcp_server = create_default_tools(MCPToolServer())
+
     supervisor = SupervisorNode(llm, working_memory)
 
-    intent_router = IntentRouterAgent(llm)
+    intent_router = IntentRouterAgent(llm)       # 这个目前没有真正加入图，可以先保留，也可以先删掉
     knowledge_agent = KnowledgeRAGAgent(llm, long_term_memory)
-    ticket_agent = TicketHandlerAgent(llm)
+    # ticket_agent = TicketHandlerAgent(llm)
+    ticket_agent = TicketHandlerAgent(llm, mcp_server=mcp_server)
     compliance_agent = ComplianceCheckerAgent(llm)
 
     graph = StateGraph(AgentState)
@@ -196,12 +242,15 @@ def create_supervisor_graph(
         {
             "knowledge_rag": "knowledge_rag",
             "ticket_handler": "ticket_handler",
-            "compliance_check": "compliance_check",
+            # "compliance_check": "compliance_check",       # 合规审查不应该和业务 Agent 平级竞争路由
         },
     )
 
+    # 所有业务 Agent 结束后，都必须进入合规审查
     graph.add_edge("knowledge_rag", "compliance_check")
     graph.add_edge("ticket_handler", "compliance_check")
+
+    # 合规审查后再统一汇总最终回复
     graph.add_edge("compliance_check", "synthesize")
     graph.add_edge("synthesize", END)
 

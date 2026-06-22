@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import os
 import uuid
+import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -18,7 +20,7 @@ from pydantic import BaseModel
 from agents.supervisor import create_supervisor_graph
 from memory.working_memory import WorkingMemory
 from memory.short_term import ShortTermMemory
-from memory.long_term_old import LongTermMemory
+from memory.long_term import LongTermMemory
 from mcp.mcp_server import MCPToolServer, create_default_tools
 from tracing.otel_config import init_tracer, AgentMetrics
 
@@ -27,11 +29,57 @@ load_dotenv()
 
 working_memory = WorkingMemory()
 short_term_memory = ShortTermMemory(redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"))
-long_term_memory = LongTermMemory(index_path=os.getenv("FAISS_INDEX_PATH", "./vector_store/faiss_index"))
+long_term_memory = LongTermMemory()
+# long_term_memory = LongTermMemory(index_path=os.getenv("FAISS_INDEX_PATH", "./vector_store/faiss_index"))
 mcp_server = create_default_tools(MCPToolServer())
 metrics = AgentMetrics()
 graph = None
 
+
+import logging
+from pathlib import Path
+
+
+def setup_compliance_logger():
+    """初始化并配置合规/风控审计日志记录器 (Compliance Logger)。
+
+    该日志用于持久化记录 Agent 生成内容的安全风控、合规检查结果。
+    """
+    # 1. 确保日志存储目录存在
+    log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # 2. 获取或创建名为 "compliance" 的全局单例日志对象
+    logger = logging.getLogger("compliance")
+    logger.setLevel(logging.INFO)
+
+    # 3. 【核心防坑设计】防止 Uvicorn 等框架热重载(Reload)时重复添加 Handler
+    # 如果不加这个判断，每次代码热更新或多次调用该函数，都会往 logger 里重复 addHandler，
+    # 导致最终 compliance.log 文件里同一条日志被重复打印 N 次。
+    if logger.handlers:
+        return
+
+    # 4. 创建文件处理器 (FileHandler)，指定日志写入路径及 UTF-8 编码（防止中文乱码）
+    file_handler = logging.FileHandler(
+        log_dir / "compliance.log",
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+
+    # 5. 定义日志输出格式，标准样式如: 2026-06-18 17:05:00,123 [INFO] 日志内容
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    file_handler.setFormatter(formatter)
+
+    # 6. 将配置好的文件处理器绑定到 logger 对象上
+    logger.addHandler(file_handler)
+
+    # 7. 允许日志向上传递 (Propagate)
+    # 这样除了写入 compliance.log 外，如果根日志 (Root Logger) 配置了控制台输出，
+    # 终端屏幕上也能同时同步看到合规日志。
+    logger.propagate = True
+
+# 执行初始化配置
+setup_compliance_logger()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,6 +95,7 @@ async def lifespan(app: FastAPI):
         working_memory=working_memory,
         short_term_memory=short_term_memory,
         long_term_memory=long_term_memory,
+        mcp_server=mcp_server,
     )
 
     long_term_memory.add_document(
@@ -90,8 +139,8 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     response: str
     session_id: str
-    intent: str
-    compliance_passed: bool
+    # intent: str
+    # compliance_passed: bool
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -113,6 +162,7 @@ async def chat(request: ChatRequest):
         "intent": "",
         "sub_results": {},
         "compliance_passed": True,
+        "compliance_report": {},
         "final_response": "",
         "current_agent": "",
         "retry_count": 0,
@@ -132,8 +182,8 @@ async def chat(request: ChatRequest):
     return ChatResponse(
         response=final_response,
         session_id=session_id,
-        intent=result.get("intent", "unknown"),
-        compliance_passed=result.get("compliance_passed", True),
+        # intent=result.get("intent", "unknown"),
+        # compliance_passed=result.get("compliance_passed", True),
     )
 
 

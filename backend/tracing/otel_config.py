@@ -40,7 +40,7 @@ def init_tracer(
     if not _HAS_OTEL:
         return
 
-    resource = Resource.create({"service.name": service_name})
+    resource = Resource.create({"services.name": service_name})
     provider = TracerProvider(resource=resource)
 
     if otlp_endpoint:

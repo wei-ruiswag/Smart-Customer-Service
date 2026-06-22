@@ -11,32 +11,39 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
-from memory.long_term_old import LongTermMemory
+from memory.long_term import LongTermMemory
 from tracing.otel_config import trace_agent_call
 
 from rag.knowledge_search import search_knowledge
 
 
-RAG_SYSTEM_PROMPT = """你是一个专业的知识库问答Agent，负责根据检索到的文档回答用户问题。
+RAG_SYSTEM_PROMPT = """你是一个面向电商客服场景的知识库问答 Agent。
 
 回答规则：
-1. 严格基于检索到的文档内容回答，不要编造信息
-2. 如果文档中没有相关信息，明确告知用户并建议转人工
-3. 回答要简洁专业，适合客服场景
-4. 对于金融产品信息，必须标注"以上信息仅供参考，具体以合同条款为准"
-5. 在回答末尾标注引用的文档来源
+1. 必须严格基于检索到的知识库文档回答，不要编造政策、时间、金额或承诺。
+2. 如果文档中没有相关信息，应明确说明“知识库中暂未找到相关说明”，并建议联系人工客服。
+3. 回答要简洁、清楚、礼貌，适合客服场景。
+4. 涉及退款到账、物流送达、售后处理时效时，不得使用“保证”“一定”“马上到账”“必定送达”等绝对化表述。
+5. 不要输出用户完整手机号、详细地址、身份证号、银行卡号等隐私信息。
+6. 回答末尾标注文档来源。
 
 回答格式：
-- 先直接回答用户问题
-- 如有必要补充相关信息
-- 金融场景需添加风险提示
+先直接回答用户问题；
+再补充必要条件或注意事项；
+最后给出来源。
 """
 
-QUERY_REWRITE_PROMPT = """请将用户的口语化问题改写为更适合向量检索的查询语句。
-保留核心语义，去除口语化表达，补充专业术语。
-只返回改写后的查询，不要其他内容。
+QUERY_REWRITE_PROMPT = """请将用户的口语化问题改写为适合电商客服知识库检索的查询语句。
 
-用户原始问题: {query}
+要求：
+1. 保留用户问题的核心语义。
+2. 保留订单号、工单号、商品名、金额、时间等关键实体。
+3. 不要编造用户没有提供的信息。
+4. 可补充与电商客服相关的检索关键词，例如：售后、退款、退货、换货、物流、发票、优惠券、会员、支付。
+5. 只返回改写后的查询语句，不要解释。
+
+用户原始问题：{query}
+
 """
 
 
