@@ -20,6 +20,9 @@ from agents.intent_router import IntentRouterAgent
 from agents.knowledge_rag import KnowledgeRAGAgent
 from agents.ticket_handler import TicketHandlerAgent
 from agents.compliance_checker import ComplianceCheckerAgent
+from agents.product_agent import ProductAgent
+from agents.order_agent import OrderAgent
+from utils.prompt_loader import get_prompt
 from memory.working_memory import WorkingMemory
 from memory.short_term import ShortTermMemory
 from memory.long_term import LongTermMemory
@@ -35,6 +38,7 @@ class AgentState(TypedDict):
     user_id: str
     session_id: str
     intent: str
+    intent_result: dict[str, Any]
     sub_results: dict[str, Any]             # 只保存业务 Agent 的自然语言回复
     compliance_passed: bool
     compliance_report: dict[str, Any]       # 合规审查结果单独保存
@@ -45,24 +49,30 @@ class AgentState(TypedDict):
 
 # ─── Supervisor节点 ───
 
-SUPERVISOR_SYSTEM_PROMPT = """你是一个智能客服系统的Supervisor（主管编排Agent）。
-你的职责是：
-1. 分析用户意图，决定分发给哪个子Agent处理
-2. 汇总子Agent的处理结果，生成最终回复
-3. 确保所有回复都经过合规审查
-
-可用的子Agent：
-- intent_router: 意图识别和分类
-- knowledge_rag: 知识库检索和回答
-- ticket_handler: 工单创建和查询
-- compliance_checker: 合规审查和敏感词检测
-
-根据用户消息，决定下一步路由到哪个Agent。
-"""
+SUPERVISOR_SYSTEM_PROMPT = get_prompt("supervisor", "system")
+# """你是一个智能客服系统的Supervisor（主管编排Agent）。
+# 你的职责是：
+# 1. 分析用户意图，决定分发给哪个子Agent处理
+# 2. 汇总子Agent的处理结果，生成最终回复
+# 3. 确保所有回复都经过合规审查
+#
+# 可用的子Agent：
+# - intent_router: 意图识别和分类
+# - knowledge_rag: 知识库检索和回答
+# - ticket_handler: 工单创建和查询
+# - compliance_checker: 合规审查和敏感词检测
+#
+# 根据用户消息，决定下一步路由到哪个Agent。
+# """
 
 
 class SupervisorNode:
-    """Supervisor决策节点"""
+    """
+    Supervisor决策节点：
+    IntentRouter 高置信度 → 直接采纳
+    IntentRouter 低置信度 → Supervisor 再判断一次
+    Supervisor 判断异常 → 回退到 IntentRouter 建议或 knowledge_rag
+    """
 
     def __init__(self, llm: ChatOpenAI, working_memory: WorkingMemory):
         self.llm = llm
@@ -70,30 +80,54 @@ class SupervisorNode:
 
     @trace_agent_call("supervisor")
     async def route_decision(self, state: AgentState) -> AgentState:
-        """分析用户意图，决定路由"""
+        """根据 IntentRouter 结果和上下文，决定最终路由"""
         messages = state["messages"]
         session_id = state.get("session_id", "default")
-
         context = self.working_memory.get_context(session_id)
 
-        routing_prompt = [
-            SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
-            SystemMessage(content=f"当前工作记忆上下文: {context}"),
-            *messages,
-            HumanMessage(content=(
-                "请分析用户的最新消息，返回应该路由到的Agent名称。"
-                "只返回以下之一: knowledge_rag, ticket_handler, compliance_checker"
-            )),
-        ]
+        intent_result = state.get("intent_result", {})
+        suggested_agent = str(intent_result.get("suggested_agent", "")).strip()
+        confidence = float(intent_result.get("confidence", 0.0) or 0.0)
 
-        response = await self.llm.ainvoke(routing_prompt)
-        intent = response.content.strip().lower()
+        valid_intents = {
+            "knowledge_rag",
+            "product_agent",
+            "order_agent",
+            "ticket_handler",
+        }
 
-        valid_intents = {"knowledge_rag", "ticket_handler", "compliance_checker"}
-        if intent not in valid_intents:
-            intent = "knowledge_rag"
+        # 高置信度时，Supervisor 可以直接采纳 IntentRouter 建议。
+        # 这样减少一次 LLM 路由判断，提高速度。
+        if confidence >= 0.85 and suggested_agent in valid_intents:
+            intent = suggested_agent
+        else:
+            routing_prompt = [
+                SystemMessage(content=SUPERVISOR_SYSTEM_PROMPT),
+                SystemMessage(content=f"当前工作记忆上下文: {context}"),
+                SystemMessage(content=f"IntentRouter识别结果: {intent_result}"),
+                *messages,
+                HumanMessage(
+                    content=(
+                        "请分析用户的最新消息，并结合 IntentRouter 识别结果，"
+                        "返回最终应该路由到的Agent名称。"
+                        "只返回以下之一: knowledge_rag, product_agent, order_agent, ticket_handler"
+                    )
+                ),
+            ]
 
-        self.working_memory.update(session_id, {"last_intent": intent})
+            response = await self.llm.ainvoke(routing_prompt)
+            intent = response.content.strip().lower()
+
+            if intent not in valid_intents:
+                intent = suggested_agent if suggested_agent in valid_intents else "knowledge_rag"
+
+        self.working_memory.update(
+            session_id,
+            {
+                "last_intent": intent,
+                "last_intent_result": intent_result,
+            },
+        )
 
         return {
             **state,
@@ -169,6 +203,8 @@ def route_to_agent(state: AgentState) -> str:
     intent = state.get("intent", "knowledge_rag")
     route_map = {
         "knowledge_rag": "knowledge_rag",
+        "product_agent": "product_agent",
+        "order_agent": "order_agent",
         "ticket_handler": "ticket_handler",
         # "compliance_checker": "compliance_check",
     }
@@ -188,73 +224,65 @@ def create_supervisor_graph(
     short_term_memory: ShortTermMemory | None = None,
     long_term_memory: LongTermMemory | None = None,
     enable_checkpointing: bool = True,
-    mcp_server: MCPToolServer | None = None
-
+    mcp_server: MCPToolServer | None = None,
 ) -> StateGraph:
-    """
-    构建Supervisor编排的多Agent StateGraph。
-
-    这是整个系统的核心入口，将4个子Agent通过有向图连接起来，
-    由Supervisor节点负责路由决策和结果汇总。
-
-    Args:
-        llm: 语言模型实例
-        working_memory: 工作记忆
-        short_term_memory: 短期记忆
-        long_term_memory: 长期记忆
-        enable_checkpointing: 是否启用检查点（支持断点恢复）
-    """
     if llm is None:
         llm = ChatOpenAI(
             model=os.getenv("MODEL_NAME"),
             temperature=0,
             base_url=os.getenv("OPENAI_BASE_URL"),
         )
+
     if working_memory is None:
         working_memory = WorkingMemory()
 
-    # 如果外部没有传入 mcp_server，则创建一个默认工具服务
-    # 更推荐在 api/main.py 中创建后传进来，保证全局共用同一个 mcp_server。
     if mcp_server is None:
         mcp_server = create_default_tools(MCPToolServer())
 
     supervisor = SupervisorNode(llm, working_memory)
 
-    intent_router = IntentRouterAgent(llm)       # 这个目前没有真正加入图，可以先保留，也可以先删掉
+    intent_router = IntentRouterAgent(llm)
     knowledge_agent = KnowledgeRAGAgent(llm, long_term_memory)
-    # ticket_agent = TicketHandlerAgent(llm)
+    product_agent = ProductAgent(llm, mcp_server=mcp_server)
+    order_agent = OrderAgent(llm, mcp_server=mcp_server)
     ticket_agent = TicketHandlerAgent(llm, mcp_server=mcp_server)
     compliance_agent = ComplianceCheckerAgent(llm)
 
     graph = StateGraph(AgentState)
 
+    graph.add_node("intent_router", intent_router.process)
     graph.add_node("supervisor_route", supervisor.route_decision)
     graph.add_node("knowledge_rag", knowledge_agent.process)
+    graph.add_node("product_agent", product_agent.process)
+    graph.add_node("order_agent", order_agent.process)
     graph.add_node("ticket_handler", ticket_agent.process)
     graph.add_node("compliance_check", compliance_agent.process)
     graph.add_node("synthesize", supervisor.synthesize_response)
 
-    graph.set_entry_point("supervisor_route")
+    # 先做意图识别，再交给 Supervisor 做最终路由
+    graph.set_entry_point("intent_router")
+    graph.add_edge("intent_router", "supervisor_route")
 
     graph.add_conditional_edges(
         "supervisor_route",
         route_to_agent,
         {
             "knowledge_rag": "knowledge_rag",
+            "product_agent": "product_agent",
+            "order_agent": "order_agent",
             "ticket_handler": "ticket_handler",
-            # "compliance_check": "compliance_check",       # 合规审查不应该和业务 Agent 平级竞争路由
         },
     )
 
-    # 所有业务 Agent 结束后，都必须进入合规审查
+    # 所有业务 Agent 结束后都进入合规审查
     graph.add_edge("knowledge_rag", "compliance_check")
+    graph.add_edge("product_agent", "compliance_check")
+    graph.add_edge("order_agent", "compliance_check")
     graph.add_edge("ticket_handler", "compliance_check")
 
-    # 合规审查后再统一汇总最终回复
     graph.add_edge("compliance_check", "synthesize")
     graph.add_edge("synthesize", END)
 
     checkpointer = MemorySaver() if enable_checkpointing else None
     compiled = graph.compile(checkpointer=checkpointer)
-
     return compiled

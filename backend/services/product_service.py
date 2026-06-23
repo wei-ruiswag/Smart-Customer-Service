@@ -1,24 +1,23 @@
 # backend/services/product_service.py
+from __future__ import annotations
 
-import os
-import pymysql
+from datetime import datetime
+from decimal import Decimal
 from typing import Any
-from dotenv import load_dotenv
 
-# 在读取环境变量之前，先加载 .env 文件
-load_dotenv()
+from utils.db import mysql_cursor
 
-def get_mysql_connection():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=os.getenv("MYSQL_USER", "root"),
-        password=os.getenv("MYSQL_PASSWORD", ""),
-        database=os.getenv("MYSQL_DATABASE", "smart_cs"),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-    )
 
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return value
+
+
+def _json_safe_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: _json_safe(value) for key, value in row.items()}
 
 def search_products(
     keyword: str | None = None,
@@ -30,7 +29,7 @@ def search_products(
 ) -> list[dict[str, Any]]:
     """
     查询商品信息。
-    适合处理：商品名称、分类、价格、库存、描述等结构化查询。
+    适合处理：商品名称、分类、价格、库存、描述、商品售后字段等结构化查询。
     """
 
     sql = """
@@ -38,14 +37,13 @@ def search_products(
             id,
             product_name,
             category,
-            # brand,
             price,
             stock,
             description,
             after_sale_policy
         FROM products
         WHERE 1 = 1
-    """
+    """   # brand,
 
     params: list[Any] = []
 
@@ -53,8 +51,7 @@ def search_products(
         sql += """
             AND (
                 product_name LIKE %s
-                OR category LIKE %s
-                
+                OR category LIKE %s       
                 OR description LIKE %s
             )
         """             # OR brand LIKE %s
@@ -79,10 +76,8 @@ def search_products(
     sql += " ORDER BY price ASC LIMIT %s"
     params.append(limit)
 
-    conn = get_mysql_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, params)
-            return cursor.fetchall()
-    finally:
-        conn.close()
+    with mysql_cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+
+    return [_json_safe_row(row) for row in rows]

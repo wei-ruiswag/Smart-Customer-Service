@@ -14,6 +14,7 @@ from datetime import datetime
 from mcp.tools.knowledge_tool import knowledge_search
 from mcp.tools.product_tool import product_query
 from mcp.tools.ticket_tool import ticket_create, ticket_query, ticket_update
+from mcp.tools.order_tool import order_query
 
 @dataclass
 class ToolDefinition:
@@ -196,26 +197,40 @@ class MCPToolServer:
 def create_default_tools(server: MCPToolServer) -> MCPToolServer:
     """注册默认的MCP工具集"""
 
-    @server.register(
+    server.register(
         name="order_query",
-        description="查询订单信息，支持按订单号或用户ID查询",
+        description="查询当前用户订单信息，支持按订单号查询或查询最近订单",
         input_schema={
             "type": "object",
             "properties": {
-                "order_id": {"type": "string", "description": "订单号"},
-                "user_id": {"type": "string", "description": "用户ID"},
+                "order_no": {"type": "string", "description": "订单号"},
+                "user_id": {"type": "string", "description": "当前用户ID"},
+                "limit": {"type": "integer", "description": "未提供订单号时返回最近订单数量", "default": 5},
             },
+            "required": ["user_id"],
         },
         category="order",
-    )
-    async def order_query(order_id: str = "", user_id: str = "") -> dict:
-        return {
-            "order_id": order_id or "ORD-20260401-001",
-            "status": "shipped",
-            "amount": 299.00,
-            "product": "智能理财产品A",
-            "created_at": "2026-04-01T10:00:00",
-        }
+    )(order_query)
+    # @server.register(
+    #     name="order_query",
+    #     description="查询订单信息，支持按订单号或用户ID查询",
+    #     input_schema={
+    #         "type": "object",
+    #         "properties": {
+    #             "order_id": {"type": "string", "description": "订单号"},
+    #             "user_id": {"type": "string", "description": "用户ID"},
+    #         },
+    #     },
+    #     category="order",
+    # )
+    # async def order_query(order_id: str = "", user_id: str = "") -> dict:
+    #     return {
+    #         "order_id": order_id or "ORD-20260401-001",
+    #         "status": "shipped",
+    #         "amount": 299.00,
+    #         "product": "智能理财产品A",
+    #         "created_at": "2026-04-01T10:00:00",
+    #     }
 
     server.register(
         name="knowledge_search",

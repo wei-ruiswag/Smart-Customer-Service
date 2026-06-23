@@ -9,17 +9,9 @@ from typing import Any
 
 import pymysql
 
+from utils.db import mysql_cursor
 
-def get_mysql_connection():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "127.0.0.1"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        user=os.getenv("MYSQL_USER", "root"),
-        password=os.getenv("MYSQL_PASSWORD", ""),
-        database=os.getenv("MYSQL_DATABASE", "smart_customer_service"),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-    )
+
 
 
 def generate_ticket_no() -> str:
@@ -41,14 +33,18 @@ def order_exists(order_no: str, user_id: str | None = None) -> bool:
         sql += " AND user_id = %s"
         params.append(user_id)
 
-    conn = get_mysql_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, params)
-            row = cursor.fetchone()
-            return bool(row and row["cnt"] > 0)
-    finally:
-        conn.close()
+    with mysql_cursor() as cursor:
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+
+    # conn = get_mysql_connection()
+    # try:
+    #     with conn.cursor() as cursor:
+    #         cursor.execute(sql, params)
+    #         row = cursor.fetchone()
+    #         return bool(row and row["cnt"] > 0)
+    # finally:
+    #     conn.close()
 
 
 def create_ticket(
@@ -82,24 +78,23 @@ def create_ticket(
             (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
     """
 
-    conn = get_mysql_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                sql,
-                (
-                    ticket_no,
-                    user_id,
-                    order_no,
-                    ticket_type,
-                    priority,
-                    status,
-                    description,
-                ),
-            )
-        conn.commit()
-    finally:
-        conn.close()
+    with mysql_cursor(commit=True) as cursor:
+        cursor.execute(
+            sql,
+            (
+                ticket_no,
+                user_id,
+                order_no,
+                ticket_type,
+                priority,
+                status,
+                description,
+            ),
+        )
+
+    ticket = get_ticket_by_no(ticket_no)
+    if ticket is None:
+        raise RuntimeError(f"工单 {ticket_no} 创建后查询失败")
 
     return get_ticket_by_no(ticket_no)
 
@@ -122,13 +117,9 @@ def get_ticket_by_no(ticket_no: str) -> dict[str, Any] | None:
         LIMIT 1
     """
 
-    conn = get_mysql_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, (ticket_no,))
-            return cursor.fetchone()
-    finally:
-        conn.close()
+    with mysql_cursor() as cursor:
+        cursor.execute(sql, (ticket_no,))
+        return cursor.fetchone()
 
 
 def query_tickets(
@@ -173,14 +164,9 @@ def query_tickets(
     sql += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
 
-    conn = get_mysql_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, params)
-            return cursor.fetchall()
-    finally:
-        conn.close()
-
+    with mysql_cursor() as cursor:
+        cursor.execute(sql, params)
+        return cursor.fetchall()
 
 def update_ticket_status(ticket_no: str, status: str) -> dict[str, Any] | None:
     sql = """
@@ -189,12 +175,17 @@ def update_ticket_status(ticket_no: str, status: str) -> dict[str, Any] | None:
         WHERE ticket_no = %s
     """
 
-    conn = get_mysql_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(sql, (status, ticket_no))
-        conn.commit()
-    finally:
-        conn.close()
+    with mysql_cursor(commit=True) as cursor:
+        cursor.execute(sql, (status, ticket_no))
 
     return get_ticket_by_no(ticket_no)
+    # conn = get_mysql_connection()
+    # try:
+    #     with conn.cursor() as cursor:
+    #         cursor.execute(sql, (status, ticket_no))
+    #     conn.commit()
+    # finally:
+    #     conn.close()
+    #
+    #
+    # return get_ticket_by_no(ticket_no)

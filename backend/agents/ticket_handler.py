@@ -1,6 +1,6 @@
 """
 工单处理Agent — 工单CRUD与流转
-负责创建、查询、更新工单，对接工单系统，处理退款/理赔/开户等业务办理类需求。
+负责创建、查询、更新工单，对接工单系统，处理退款/换货/修改地址等办理类需求。
 通过MCP工具协议调用外部工单系统。
 """
 
@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from tracing.otel_config import trace_agent_call
+from utils.prompt_loader import get_prompt
 
 
 class TicketStatus(str, Enum):
@@ -33,58 +34,7 @@ class TicketPriority(str, Enum):
     URGENT = "urgent"
 
 
-TICKET_SYSTEM_PROMPT = """你是一个面向电商客服场景的工单处理 Agent，只负责工单创建、查询和更新。
-
-你不负责回答通用规则，也不负责查询订单物流状态。
-- “怎么退款 / 退款流程 / 退款多久到账”属于规则咨询，不应该创建工单。
-- “我的订单什么时候到 / 订单发货了吗”属于订单查询，不应该创建工单。
-- 只有用户明确要求申请、办理、投诉、创建工单、查询工单、更新工单时，才进入工单处理。
-
-你的任务：
-1. 判断 action：create、query、update、clarify。
-2. 提取 ticket_no、order_no、ticket_type、priority、description。
-3. 创建工单必须尽量提取 order_no；如果用户没有提供订单号，返回 clarify。
-4. 查询工单时，如果有工单号，提取 ticket_no；如果没有工单号但有订单号，提取 order_no。
-5. 不要编造工单号、订单号、用户ID。
-
-工单类型只能从以下值中选择：
-- 退款
-- 退货
-- 换货
-- 物流异常
-- 商品质量
-- 发票问题
-- 优惠券问题
-- 投诉
-- 通用
-
-优先级只能从以下值中选择：
-- 低
-- 中
-- 高
-- 紧急
-
-状态只能从以下值中选择：
-- 待处理
-- 处理中
-- 已完成
-- 已关闭
-
-请只返回合法 JSON，不要使用 markdown，不要使用代码块。
-
-返回格式：
-{
-  "action": "create|query|update|clarify",
-  "ticket_no": "",
-  "order_no": "",
-  "ticket_type": "退款",
-  "priority": "中",
-  "description": "用户希望申请退款",
-  "status": "",
-  "clarification_question": ""
-}
-"""
-
+TICKET_SYSTEM_PROMPT = get_prompt("ticket_handler", "system")
 
 class TicketStore:
     """内存工单存储（生产环境应替换为数据库）"""
@@ -120,6 +70,20 @@ class TicketStore:
             ticket["status"] = status
             ticket["updated_at"] = datetime.now().isoformat()
         return ticket
+
+
+TICKET_HANDLE_TIME = {
+    "退款": "通常 1-3 个工作日内处理，具体以平台审核结果为准。",
+    "退货": "通常 1-3 个工作日内处理，具体以平台审核结果为准。",
+    "换货": "通常 1-3 个工作日内处理，具体以平台审核结果为准。",
+    "物流异常": "通常 1-3 个工作日内核实物流情况。",
+    "地址修改": "通常会尽快处理；若订单已发货，是否能修改以物流和客服处理结果为准。",
+    "商品质量": "通常 1-3 个工作日内核实处理。",
+    "发票问题": "通常 1-2 个工作日内处理。",
+    "优惠券问题": "通常 1-2 个工作日内核实处理。",
+    "投诉": "会优先反馈给客服人员处理，具体进度以客服跟进结果为准。",
+    "通用": "通常 1-3 个工作日内处理。",
+}
 
 
 class TicketHandlerAgent:
@@ -177,16 +141,52 @@ class TicketHandlerAgent:
             "result": call_result.result,
         }
 
-    def _format_ticket(self, ticket: dict) -> str:
-        return (
-            f"📋 工单号: {ticket.get('ticket_no', '')}\n"
-            f"🔗 关联订单: {ticket.get('order_no', '')}\n"
-            f"📝 类型: {ticket.get('ticket_type', '')}\n"
-            f"⚡ 优先级: {ticket.get('priority', '')}\n"
-            f"📊 状态: {ticket.get('status', '')}\n"
-            f"📄 问题描述: {ticket.get('description', '')}\n"
-            f"🕐 创建时间: {ticket.get('created_at', '')}\n"
-            f"🔄 更新时间: {ticket.get('updated_at', '')}"
+    def _format_ticket(self, ticket: dict, show_description: bool = True) -> str:
+
+        ticket_type = ticket.get("ticket_type", "通用")
+        priority = ticket.get("priority", "中")
+        handle_time = self._get_handle_time(ticket_type, priority)
+
+        lines = [
+            f"📋 工单号：{ticket.get('ticket_no', '')}",
+            f"🔗 关联订单：{ticket.get('order_no', '')}",
+            f"📝 问题类型：{ticket_type}",
+            f"📊 当前状态：{ticket.get('status', '')}",
+            f"⚡ 参考处理时效：{handle_time}",
+        ]
+
+        if show_description:
+            lines.append(f"📄 问题描述：{ticket.get('description', '')}")
+
+        if ticket.get("created_at"):
+            lines.append(f"🕐 创建时间：{ticket.get('created_at', '')}")
+
+        if ticket.get("updated_at"):
+            lines.append(f"🔄 更新时间：{ticket.get('updated_at', '')}")
+
+        return "\n".join(lines)
+        # return (
+        #     f"📋 工单号: {ticket.get('ticket_no', '')}\n"
+        #     f"🔗 关联订单: {ticket.get('order_no', '')}\n"
+        #     f"📝 类型: {ticket.get('ticket_type', '')}\n"
+        #     f"⚡ 优先级: {ticket.get('priority', '')}\n"
+        #     f"📊 状态: {ticket.get('status', '')}\n"
+        #     f"📄 问题描述: {ticket.get('description', '')}\n"
+        #     f"🕐 创建时间: {ticket.get('created_at', '')}\n"
+        #     f"🔄 更新时间: {ticket.get('updated_at', '')}"
+        # )
+
+    def _get_handle_time(self, ticket_type: str, priority: str = "中") -> str:
+        """
+        根据工单类型和优先级返回参考处理时效。
+        注意：这里只给参考时效，不承诺一定完成。
+        """
+        if priority in {"紧急", "高"} and ticket_type in {"投诉", "物流异常", "商品质量"}:
+            return "会优先反馈给客服人员处理，具体进度以平台核实和客服跟进结果为准。"
+
+        return TICKET_HANDLE_TIME.get(
+            ticket_type,
+            "通常 1-3 个工作日内处理，具体以平台审核和客服跟进结果为准。",
         )
 
     @trace_agent_call("ticket_create")
@@ -220,10 +220,14 @@ class TicketHandlerAgent:
 
         ticket = result["ticket"]
 
+        ticket_type = ticket.get("ticket_type", ticket_info.get("ticket_type", "通用"))
+        priority = ticket.get("priority", ticket_info.get("priority", "中"))
+        handle_time = self._get_handle_time(ticket_type, priority)
+
         return (
-            "工单已创建成功！\n\n"
-            f"{self._format_ticket(ticket)}\n\n"
-            "我们将尽快处理您的请求，请保存好工单号以便后续查询。"
+            "已为您提交处理申请。\n\n"
+            f"{self._format_ticket(ticket, show_description=False)}\n\n"
+            "您可以后续通过工单号查询处理进度。涉及退款、赔付、换货或地址修改等事项，最终以平台审核和客服处理结果为准。"
         )
 
     @trace_agent_call("ticket_query")
@@ -250,9 +254,17 @@ class TicketHandlerAgent:
             return result.get("message", "未查询到符合条件的工单。")
 
         tickets = result.get("tickets", [])
-        formatted = "\n\n".join(self._format_ticket(ticket) for ticket in tickets)
+        formatted = "\n\n".join(
+            self._format_ticket(ticket, show_description=True)
+            for ticket in tickets
+        )
 
-        return f"工单查询结果：\n\n{formatted}"
+        return (
+            "为您查询到以下处理记录：\n\n"
+            f"{formatted}\n\n"
+            "处理进度以客服人员实际跟进结果为准。"
+        )
+
 
     @trace_agent_call("ticket_update")
     async def update_ticket(self, ticket_info: dict) -> str:
@@ -281,8 +293,9 @@ class TicketHandlerAgent:
             return result.get("message", f"未找到工单号 {ticket_no}。")
 
         return (
-            "工单状态已更新：\n\n"
-            f"{self._format_ticket(result['ticket'])}"
+            "处理记录状态已更新：\n\n"
+            f"{self._format_ticket(result['ticket'])}\n\n"
+            "后续处理结果以客服人员跟进和平台审核结果为准。"
         )
 
     @trace_agent_call("ticket_handler_process")

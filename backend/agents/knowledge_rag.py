@@ -15,36 +15,12 @@ from memory.long_term import LongTermMemory
 from tracing.otel_config import trace_agent_call
 
 from rag.knowledge_search import search_knowledge
+from utils.prompt_loader import get_prompt
 
 
-RAG_SYSTEM_PROMPT = """你是一个面向电商客服场景的知识库问答 Agent。
+RAG_SYSTEM_PROMPT = get_prompt("knowledge_rag", "system")
 
-回答规则：
-1. 必须严格基于检索到的知识库文档回答，不要编造政策、时间、金额或承诺。
-2. 如果文档中没有相关信息，应明确说明“知识库中暂未找到相关说明”，并建议联系人工客服。
-3. 回答要简洁、清楚、礼貌，适合客服场景。
-4. 涉及退款到账、物流送达、售后处理时效时，不得使用“保证”“一定”“马上到账”“必定送达”等绝对化表述。
-5. 不要输出用户完整手机号、详细地址、身份证号、银行卡号等隐私信息。
-6. 回答末尾标注文档来源。
-
-回答格式：
-先直接回答用户问题；
-再补充必要条件或注意事项；
-最后给出来源。
-"""
-
-QUERY_REWRITE_PROMPT = """请将用户的口语化问题改写为适合电商客服知识库检索的查询语句。
-
-要求：
-1. 保留用户问题的核心语义。
-2. 保留订单号、工单号、商品名、金额、时间等关键实体。
-3. 不要编造用户没有提供的信息。
-4. 可补充与电商客服相关的检索关键词，例如：售后、退款、退货、换货、物流、发票、优惠券、会员、支付。
-5. 只返回改写后的查询语句，不要解释。
-
-用户原始问题：{query}
-
-"""
+QUERY_REWRITE_PROMPT = get_prompt("knowledge_rag", "query_rewrite")
 
 
 class KnowledgeRAGAgent:
