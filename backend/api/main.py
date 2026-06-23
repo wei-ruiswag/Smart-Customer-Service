@@ -24,6 +24,9 @@ from memory.long_term import LongTermMemory
 from mcp.mcp_server import MCPToolServer, create_default_tools
 from tracing.otel_config import init_tracer, AgentMetrics
 
+
+
+
 load_dotenv()
 
 
@@ -86,10 +89,12 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     global graph
 
-    init_tracer(
-        service_name=os.getenv("OTEL_SERVICE_NAME", "smart-cs-multi-agent"),
-        otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
-    )
+    init_tracer()
+
+    # init_tracer(
+    #     service_name=os.getenv("OTEL_SERVICE_NAME", "smart-cs-multi-agent"),
+    #     otlp_endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+    # )
 
     graph = create_supervisor_graph(
         working_memory=working_memory,

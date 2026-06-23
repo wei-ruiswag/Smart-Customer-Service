@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from tracing.otel_config import trace_agent_call
+from utils.prompt_loader import load_prompt_file
 
 
 logger = logging.getLogger("compliance")
@@ -33,58 +34,16 @@ class ComplianceResult:
     suggestions: list[str] = field(default_factory=list)
     sanitized_content: str = ""
 
+_compliance_cfg = load_prompt_file("compliance_checker")
 
-SENSITIVE_PATTERNS = {
-    "phone": r"1[3-9]\d{9}",
-    "id_card": r"\d{17}[\dXx]",
-    "bank_card": r"\d{16,19}",
-    "email": r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-}
+SENSITIVE_PATTERNS = _compliance_cfg.get("sensitive_patterns", {})
 
-FORBIDDEN_TERMS = [
-    "保证退款", "一定到账", "必定送达", "百分百赔付",
-    "私下转账", "加微信付款", "提供验证码", "支付密码",
-    # "保证收益", "稳赚不赔", "零风险", "保本保息",
-    # "最高收益", "预期收益率", "承诺回报",
-    # "内部消息", "内幕", "暗箱操作",
-]
+FORBIDDEN_TERMS = _compliance_cfg.get("forbidden_terms", [])
 
-COMPLIANCE_SYSTEM_PROMPT = """你是一个面向电商客服场景的合规审查 Agent，负责审查客服回复内容是否安全、合规、适合发送给用户。
+COMPLIANCE_SYSTEM_PROMPT = _compliance_cfg.get("system", "")
 
-审查维度：
-1. 是否泄露用户隐私信息，例如完整手机号、身份证号、银行卡号、邮箱、详细收货地址。
-2. 是否存在绝对化承诺，例如“保证退款到账”“一定今天送达”“必定赔偿”。
-3. 是否存在越权承诺，例如未经审核直接承诺退款、赔偿金额、特殊优惠。
-4. 是否存在支付或交易风险，例如引导用户脱离平台交易、私下转账、提供验证码或支付密码。
-5. 是否存在不当客服表达，例如歧视、侮辱、威胁、诱导用户放弃合法权益。
-6. 是否需要建议转人工客服处理。
 
-请只返回合法 JSON，不要使用 markdown，不要使用代码块。
 
-返回格式：
-{
-  "passed": true,
-  "risk_level": "low",
-  "violations": [],
-  "suggestions": []
-}"""
-
-# 你是一个金融合规审查Agent，负责审查客服回复内容的合规性。
-#
-# 审查维度：
-# 1. 是否包含违规金融用语（如"保证收益"、"零风险"等）
-# 2. 是否泄露用户PII信息（手机号、身份证号、银行卡号）
-# 3. 是否存在越权承诺（如擅自承诺退款/赔偿金额）
-# 4. 是否符合金融监管要求（风险提示、免责声明）
-# 5. 是否包含歧视性、侮辱性内容
-#
-# 请以JSON格式返回审查结果：
-# {
-#     "passed": true/false,
-#     "risk_level": "low|medium|high|critical",
-#     "violations": ["违规项描述"],
-#     "suggestions": ["修改建议"]
-# }
 
 
 
