@@ -50,8 +50,9 @@ COMPLIANCE_SYSTEM_PROMPT = _compliance_cfg.get("system", "")
 class ComplianceCheckerAgent:
     """合规审查Agent"""
 
-    def __init__(self, llm: ChatOpenAI):
+    def __init__(self, llm: ChatOpenAI, mcp_server: Any | None = None):
         self.llm = llm
+        self.mcp_server = mcp_server
 
     def _rule_based_check(self, content: str) -> list[str]:
         """基于规则的快速检查（不依赖LLM，低延迟）"""
@@ -82,6 +83,91 @@ class ComplianceCheckerAgent:
                 return text[:3] + "*" * (len(text) - 6) + text[-3:]
             masked = re.sub(pattern, _mask_match, masked)
         return masked
+
+    def _extract_amount(self, content: str) -> float:
+        """
+        从回复文本中粗略提取金额。
+        这是兜底方案，后续更推荐由 OrderAgent / TicketHandler
+        在 state 中写入结构化 amount。
+        """
+        patterns = [
+            r"(\d+(?:\.\d+)?)\s*元",
+            r"￥\s*(\d+(?:\.\d+)?)",
+        ]
+
+        amounts: list[float] = []
+
+        for pattern in patterns:
+            for match in re.findall(pattern, content):
+                try:
+                    amounts.append(float(match))
+                except ValueError:
+                    pass
+
+        return max(amounts) if amounts else 0.0
+
+    def _infer_risk_action(self, state: dict[str, Any], content: str) -> str:
+        """
+        根据用户意图和回复内容推断风控动作类型。
+        """
+        intent = state.get("intent", "")
+
+        if "退款" in content or "退货" in content:
+            return "refund"
+
+        if "赔付" in content or "补偿" in content:
+            return "compensation"
+
+        if "支付" in content or "转账" in content:
+            return "payment"
+
+        if "修改地址" in content or "地址" in content:
+            return "address_change"
+
+        if intent:
+            return intent
+
+        return "customer_service_reply"
+
+    async def _risk_check(
+            self,
+            state: dict[str, Any],
+            content: str,
+    ) -> dict[str, Any] | None:
+        """
+        调用 MCP risk_check 工具进行结构化风控检查。
+        """
+        if self.mcp_server is None:
+            return None
+
+        user_id = state.get("user_id", "")
+        action = self._infer_risk_action(state, content)
+        amount = self._extract_amount(content)
+
+        # 普通知识问答、商品查询等没有明显交易动作时，不调用风控工具
+        if action == "customer_service_reply" and amount <= 0:
+            return None
+
+        call_result = await self.mcp_server.call_tool(
+            "risk_check",
+            {
+                "user_id": user_id,
+                "action": action,
+                "amount": amount,
+            },
+            agent_name="compliance_checker",
+            user_id=user_id,
+        )
+
+        if not call_result.success:
+            return {
+                "risk_level": "medium",
+                "requires_manual_review": True,
+                "error": call_result.error,
+            }
+
+        return call_result.result
+
 
     @trace_agent_call("compliance_rule_check")
     async def rule_check(self, content: str) -> ComplianceResult:
@@ -171,7 +257,6 @@ class ComplianceCheckerAgent:
     @trace_agent_call("compliance_process")
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
         """作为Graph节点处理状态"""
-
         sub_results = state.get("sub_results", {})
 
         # 只检查业务 Agent 生成的自然语言回复，不检查 dict、list 等结构化对象
@@ -189,6 +274,7 @@ class ComplianceCheckerAgent:
                 "risk_level": "low",
                 "violations": [],
                 "suggestions": [],
+                "risk_report": None,
             }
 
             return {
@@ -198,13 +284,45 @@ class ComplianceCheckerAgent:
                 "sub_results": sub_results,
             }
 
+        # 1. 文本合规审查
         compliance_result = await self.full_check(content_to_check)
 
+        passed = compliance_result.passed
+        risk_level = compliance_result.risk_level
+        violations = list(compliance_result.violations)
+        suggestions = list(compliance_result.suggestions)
+
+        # 2. 结构化风控检查
+        risk_report = await self._risk_check(state, content_to_check)
+
+        if risk_report:
+            tool_risk_level = risk_report.get("risk_level", "low")
+            requires_manual_review = risk_report.get("requires_manual_review", False)
+
+            if requires_manual_review:
+                passed = False
+                violations.append("交易或操作风险较高，需要人工审核")
+                suggestions.append("建议转人工客服处理")
+
+            risk_priority = {
+                "low": 0,
+                "medium": 1,
+                "high": 2,
+                "critical": 3,
+            }
+
+            risk_level = max(
+                risk_level,
+                tool_risk_level,
+                key=lambda r: risk_priority.get(r, 0),
+            )
+
         compliance_report = {
-            "passed": compliance_result.passed,
-            "risk_level": compliance_result.risk_level,
-            "violations": compliance_result.violations,
-            "suggestions": compliance_result.suggestions,
+            "passed": passed,
+            "risk_level": risk_level,
+            "violations": violations,
+            "suggestions": suggestions,
+            "risk_report": risk_report,
         }
 
         # 日志只记录结构化合规结果，不记录完整用户隐私内容
@@ -212,13 +330,14 @@ class ComplianceCheckerAgent:
             "session_id": state.get("session_id"),
             "user_id": state.get("user_id"),
             "intent": state.get("intent"),
-            "compliance_passed": compliance_result.passed,
-            "risk_level": compliance_result.risk_level,
-            "violations": compliance_result.violations,
-            "suggestions": compliance_result.suggestions,
+            "compliance_passed": passed,
+            "risk_level": risk_level,
+            "violations": violations,
+            "suggestions": suggestions,
+            "risk_report": risk_report,
         }
 
-        if compliance_result.passed:
+        if passed:
             logger.info(
                 "compliance_check %s",
                 json.dumps(log_record, ensure_ascii=False),
@@ -231,7 +350,7 @@ class ComplianceCheckerAgent:
 
         return {
             **state,
-            "compliance_passed": compliance_result.passed,
+            "compliance_passed": passed,
             "compliance_report": compliance_report,
             "sub_results": sub_results,
         }

@@ -10,6 +10,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Awaitable
 from datetime import datetime
+from jsonschema import Draft7Validator, ValidationError
 
 from mcp.tools.knowledge_tool import knowledge_search
 from mcp.tools.product_tool import product_query
@@ -36,6 +37,45 @@ class ToolCallResult:
     error: str | None = None
     duration_ms: float = 0.0
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
+
+
+# 每个 Agent 允许调用的工具白名单
+# 作用：防止某个 Agent 越权调用不属于自己的工具
+AGENT_ALLOWED_TOOLS: dict[str, set[str]] = {
+    "knowledge_rag": {"knowledge_search"},
+
+    "product_agent": {
+        "product_query",
+        "knowledge_search",
+    },
+
+    "order_agent": {
+        "order_query",
+    },
+
+    "ticket_handler": {
+        "ticket_create",
+        "ticket_query",
+        "ticket_update",
+        "order_query",
+    },
+
+    "compliance_checker": {
+        "risk_check",
+    },
+
+    # 仅用于开发调试接口
+    "api_debug": {
+        "knowledge_search",
+        "product_query",
+        "order_query",
+        "ticket_create",
+        "ticket_query",
+        "ticket_update",
+        "risk_check",
+    },
+}
+
 
 
 class MCPToolServer:
@@ -101,12 +141,51 @@ class MCPToolServer:
             })
         return tools
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolCallResult:
+    def _validate_tool_arguments(
+            self,
+            tool: ToolDefinition,
+            arguments: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """
+        校验工具入参是否符合 input_schema。
+        作用：
+        1. 防止 Agent 传错参数类型
+        2. 防止外部接口传入多余字段
+        3. 在进入数据库/业务工具前提前拦截错误
+        """
+        schema = dict(tool.input_schema or {})
+        schema.setdefault("type", "object")
+        schema.setdefault("additionalProperties", False)
+
+        validator = Draft7Validator(schema)
+        errors = sorted(validator.iter_errors(arguments), key=lambda e: e.path)
+
+        if errors:
+            error = errors[0]
+            path = ".".join(str(p) for p in error.path) or "arguments"
+            return False, f"工具参数不符合 schema：{path}: {error.message}"
+
+        return True, ""
+
+    async def call_tool(
+            self,
+            name: str,
+            arguments: dict[str, Any] | None = None,
+            *,
+            agent_name: str | None = None,
+            user_id: str | None = None,
+    ) -> ToolCallResult:
         """
         工具调用：执行指定工具。
-        对应MCP的 tools/call 方法。
+
+        新增三层校验：
+        1. allowed_tools：当前 Agent 是否允许调用该工具
+        2. requires_auth：该工具是否需要用户身份
+        3. input_schema：工具参数是否合法
         """
         import time
+
+        arguments = arguments or {}
 
         tool = self._tools.get(name)
         if tool is None:
@@ -118,7 +197,55 @@ class MCPToolServer:
             self._call_log.append(result)
             return result
 
+        # 1. Agent 工具白名单校验
+        if agent_name is not None:
+            allowed_tools = AGENT_ALLOWED_TOOLS.get(agent_name)
+            if allowed_tools is None:
+                result = ToolCallResult(
+                    tool_name=name,
+                    success=False,
+                    error=f"未知 Agent：{agent_name}，拒绝调用工具 {name}",
+                )
+                self._call_log.append(result)
+                return result
+
+            if name not in allowed_tools:
+                result = ToolCallResult(
+                    tool_name=name,
+                    success=False,
+                    error=f"Agent '{agent_name}' 无权调用工具 '{name}'",
+                )
+                self._call_log.append(result)
+                return result
+
+        # 2. 需要身份的工具必须携带 user_id
+        effective_user_id = user_id or str(arguments.get("user_id", "") or "")
+
+        if tool.requires_auth and (
+                not effective_user_id or effective_user_id == "anonymous"
+        ):
+            result = ToolCallResult(
+                tool_name=name,
+                success=False,
+                error=f"工具 '{name}' 需要已认证用户身份，当前 user_id 无效",
+            )
+            self._call_log.append(result)
+            return result
+
+        # 3. 工具参数 schema 校验
+        valid, error = self._validate_tool_arguments(tool, arguments)
+        if not valid:
+            result = ToolCallResult(
+                tool_name=name,
+                success=False,
+                error=error,
+            )
+            self._call_log.append(result)
+            return result
+
+        # 4. 真正执行工具
         start = time.time()
+
         try:
             output = await tool.handler(**arguments)
             duration_ms = (time.time() - start) * 1000
@@ -129,8 +256,10 @@ class MCPToolServer:
                 result=output,
                 duration_ms=duration_ms,
             )
+
         except Exception as e:
             duration_ms = (time.time() - start) * 1000
+
             result = ToolCallResult(
                 tool_name=name,
                 success=False,
@@ -156,7 +285,12 @@ class MCPToolServer:
             elif method == "tools/call":
                 tool_name = params.get("name", "")
                 arguments = params.get("arguments", {})
-                call_result = await self.call_tool(tool_name, arguments)
+                call_result = await self.call_tool(
+                    tool_name,
+                    arguments,
+                    agent_name=params.get("agent_name"),
+                    user_id=params.get("user_id") or arguments.get("user_id"),
+                )
                 result = {
                     "success": call_result.success,
                     "result": call_result.result,
@@ -205,11 +339,16 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "properties": {
                 "order_no": {"type": "string", "description": "订单号"},
                 "user_id": {"type": "string", "description": "当前用户ID"},
-                "limit": {"type": "integer", "description": "未提供订单号时返回最近订单数量", "default": 5},
+                "limit": {
+                    "type": "integer",
+                    "description": "未提供订单号时返回最近订单数量",
+                    "default": 5,
+                },
             },
             "required": ["user_id"],
         },
         category="order",
+        requires_auth=True,
     )(order_query)
     # @server.register(
     #     name="order_query",
@@ -288,6 +427,7 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "required": ["user_id", "order_no", "ticket_type", "description"],
         },
         category="ticket",
+        requires_auth=True,
     )(ticket_create)
 
     server.register(
@@ -303,6 +443,7 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             },
         },
         category="ticket",
+        requires_auth=True,
     )(ticket_query)
 
     server.register(
@@ -321,6 +462,7 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "required": ["ticket_no", "status"],
         },
         category="ticket",
+        requires_auth=True,
     )(ticket_update)
 
     # @server.register(
@@ -360,6 +502,7 @@ def create_default_tools(server: MCPToolServer) -> MCPToolServer:
             "required": ["user_id", "action"],
         },
         category="compliance",
+        requires_auth=True,
     )
     async def risk_check(user_id: str, action: str, amount: float = 0.0) -> dict:
         risk_level = "low"

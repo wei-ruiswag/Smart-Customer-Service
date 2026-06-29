@@ -125,8 +125,8 @@ class TicketHandlerAgent:
                 "clarification_question": "请补充订单号和需要处理的问题，我再帮您创建或查询工单。",
             }
 
-    async def _call_tool(self, tool_name: str, arguments: dict) -> dict:
-        call_result = await self.mcp_server.call_tool(tool_name, arguments)
+    async def _call_tool(self, tool_name: str, arguments: dict, user_id: str | None = None) -> dict:
+        call_result = await self.mcp_server.call_tool(tool_name, arguments, agent_name="ticket_handler", user_id=user_id or arguments.get("user_id"))
 
         if not call_result.success:
             return {
@@ -209,6 +209,7 @@ class TicketHandlerAgent:
                 "priority": ticket_info.get("priority", "中"),
                 "description": description,
             },
+            user_id=user_id,
         )
 
         if not tool_result["success"]:
@@ -244,6 +245,7 @@ class TicketHandlerAgent:
                 "order_no": order_no,
                 "limit": 5,
             },
+            user_id=user_id,
         )
 
         if not tool_result["success"]:
@@ -267,7 +269,7 @@ class TicketHandlerAgent:
 
 
     @trace_agent_call("ticket_update")
-    async def update_ticket(self, ticket_info: dict) -> str:
+    async def update_ticket(self, ticket_info: dict, user_id: str) -> str:
         ticket_no = ticket_info.get("ticket_no", "").strip()
         status = ticket_info.get("status", "").strip()
 
@@ -283,6 +285,7 @@ class TicketHandlerAgent:
                 "ticket_no": ticket_no,
                 "status": status,
             },
+            user_id=user_id,
         )
 
         if not tool_result["success"]:
@@ -320,7 +323,7 @@ class TicketHandlerAgent:
         elif action == "query":
             result = await self.query_ticket(ticket_info, user_id)
         elif action == "update":
-            result = await self.update_ticket(ticket_info)
+            result = await self.update_ticket(ticket_info, user_id)
         else:
             result = ticket_info.get("clarification_question") or "请补充订单号、工单号或需要处理的问题。"
 

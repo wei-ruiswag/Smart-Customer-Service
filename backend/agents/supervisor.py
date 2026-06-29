@@ -246,7 +246,7 @@ def create_supervisor_graph(
     product_agent = ProductAgent(llm, mcp_server=mcp_server)
     order_agent = OrderAgent(llm, mcp_server=mcp_server)
     ticket_agent = TicketHandlerAgent(llm, mcp_server=mcp_server)
-    compliance_agent = ComplianceCheckerAgent(llm)
+    compliance_agent = ComplianceCheckerAgent(llm, mcp_server=mcp_server)
 
     graph = StateGraph(AgentState)
 

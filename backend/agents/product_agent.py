@@ -61,7 +61,7 @@ class ProductAgent:
         )
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        call_result = await self.mcp_server.call_tool(tool_name, arguments)
+        call_result = await self.mcp_server.call_tool(tool_name, arguments, agent_name="product_agent")
         if not call_result.success:
             return {
                 "success": False,
@@ -114,16 +114,24 @@ class ProductAgent:
                 },
             }
 
+        tool_arguments = {
+            "keyword": parsed.get("keyword", "") or "",
+            "category": parsed.get("category", "") or "",
+            "min_price": parsed.get("min_price"),
+            "max_price": parsed.get("max_price"),
+            "only_in_stock": bool(parsed.get("only_in_stock", True)),
+            "limit": int(parsed.get("limit") or 5),
+        }
+
+        # 过滤 None，避免 JSON Schema 校验失败
+        tool_arguments = {
+            k: v for k, v in tool_arguments.items()
+            if v is not None
+        }
+
         tool_result = await self._call_tool(
             "product_query",
-            {
-                "keyword": parsed.get("keyword", "") or "",
-                "category": parsed.get("category", "") or "",
-                "min_price": parsed.get("min_price"),
-                "max_price": parsed.get("max_price"),
-                "only_in_stock": bool(parsed.get("only_in_stock", True)),
-                "limit": int(parsed.get("limit") or 5),
-            },
+            tool_arguments,
         )
 
         if not tool_result["success"]:

@@ -59,7 +59,7 @@ class OrderAgent:
         )
 
     async def _call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        call_result = await self.mcp_server.call_tool(tool_name, arguments)
+        call_result = await self.mcp_server.call_tool(tool_name, arguments, agent_name="order_agent", user_id=arguments.get("user_id"))
         if not call_result.success:
             return {
                 "success": False,

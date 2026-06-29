@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -205,20 +205,57 @@ async def list_tools():
     return {"tools": mcp_server.list_tools()}
 
 
+# @app.post("/api/tools/call")
+# async def call_tool(request: dict):
+#     arguments = request.get("arguments", {}) or {}
+#     """MCP工具调用接口"""
+#     result = await mcp_server.call_tool(
+#         name=request.get("name", ""),
+#         arguments=arguments,
+#         user_id=request.get("user_id") or arguments.get("user_id") or "debug_user",
+#     )
+#     return {
+#         "success": result.success,
+#         "result": result.result,
+#         "error": result.error,
+#         "duration_ms": result.duration_ms,
+#     }
+
 @app.post("/api/tools/call")
-async def call_tool(request: dict):
-    """MCP工具调用接口"""
+async def call_tool(
+    request: dict,
+    x_tool_key: str | None = Header(default=None),
+):
+    """
+    MCP工具调用调试接口。
+
+    注意：
+    1. 默认生产环境关闭
+    2. 只有 ENABLE_TOOL_DEBUG_API=true 时可用
+    3. 需要请求头 X-Tool-Key
+    """
+    if os.getenv("ENABLE_TOOL_DEBUG_API", "false").lower() != "true":
+        raise HTTPException(status_code=404, detail="接口不存在")
+
+    expected_key = os.getenv("TOOL_DEBUG_API_KEY", "")
+    if not expected_key or x_tool_key != expected_key:
+        raise HTTPException(status_code=403, detail="无权调用工具调试接口")
+
+    arguments = request.get("arguments", {}) or {}
+
     result = await mcp_server.call_tool(
         name=request.get("name", ""),
-        arguments=request.get("arguments", {}),
+        arguments=arguments,
+        agent_name="api_debug",
+        user_id=request.get("user_id") or arguments.get("user_id") or "debug_user",
     )
+
     return {
         "success": result.success,
         "result": result.result,
         "error": result.error,
         "duration_ms": result.duration_ms,
     }
-
 
 @app.get("/api/metrics")
 async def get_metrics():
