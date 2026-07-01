@@ -36,6 +36,7 @@ def order_exists(order_no: str, user_id: str | None = None) -> bool:
     with mysql_cursor() as cursor:
         cursor.execute(sql, params)
         row = cursor.fetchone()
+        return bool(row and row["cnt"] > 0)
 
     # conn = get_mysql_connection()
     # try:

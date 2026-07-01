@@ -107,9 +107,7 @@ class ProductAgent:
         if action == "clarify":
             answer = parsed.get("clarification_question") or "请补充您想查询的商品名称、分类、预算或使用需求。"
             return {
-                **state,
                 "sub_results": {
-                    **state.get("sub_results", {}),
                     "product_agent": answer,
                 },
             }
@@ -144,9 +142,7 @@ class ProductAgent:
             )
 
         return {
-            **state,
             "sub_results": {
-                **state.get("sub_results", {}),
                 "product_agent": answer,
             },
         }

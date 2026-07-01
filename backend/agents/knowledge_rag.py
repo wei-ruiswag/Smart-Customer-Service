@@ -124,9 +124,7 @@ class KnowledgeRAGAgent:
         answer = await self.generate_answer(original_query, reranked_docs)
 
         return {
-            **state,
             "sub_results": {
-                **state.get("sub_results", {}),
-                "knowledge_rag": answer,
+            "knowledge_rag": answer,
             },
         }

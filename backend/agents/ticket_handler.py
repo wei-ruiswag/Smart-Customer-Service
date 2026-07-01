@@ -328,10 +328,8 @@ class TicketHandlerAgent:
             result = ticket_info.get("clarification_question") or "请补充订单号、工单号或需要处理的问题。"
 
         return {
-            **state,
             "sub_results": {
-                **state.get("sub_results", {}),
-                "ticket_handler": result,
+            "ticket_handler": result,
             },
         }
 

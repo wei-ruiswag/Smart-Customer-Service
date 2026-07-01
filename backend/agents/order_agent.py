@@ -107,10 +107,8 @@ class OrderAgent:
         if action == "clarify":
             answer = parsed.get("clarification_question") or "请提供订单号，或说明是否需要查询最近订单。"
             return {
-                **state,
                 "sub_results": {
-                    **state.get("sub_results", {}),
-                    "order_agent": answer,
+                "order_agent": answer,
                 },
             }
 
@@ -134,9 +132,7 @@ class OrderAgent:
             )
 
         return {
-            **state,
             "sub_results": {
-                **state.get("sub_results", {}),
-                "order_agent": answer,
+            "order_agent": answer,
             },
         }
